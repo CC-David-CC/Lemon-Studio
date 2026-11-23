@@ -571,7 +571,7 @@ impl Transport {
     /// Peak per mixer track (L, R) heard since the last call (the mixer meters' feed); resets them.
     pub fn take_track_peaks(&self) -> Vec<[f32; 2]> {
         let heard = self.paced().map(|p| p.played(Instant::now()));
-        self.shared.tracks.lock().map(|mut t| t.take(heard)).unwrap_or_default()
+        telemetry(&self.shared.tracks).map(|mut t| t.take(heard)).unwrap_or_default()
     }
 
     /// The sample rate streams open at (the audio settings' device and rate; what hosted plugins are activated at):
@@ -625,7 +625,7 @@ impl Transport {
 
     /// The running export's progress, or its outcome once (then `Idle` again).
     pub fn export_status(&self) -> Export {
-        if let Some(r) = self.shared.export_result.lock().ok().and_then(|mut r| r.take()) {
+        if let Some(r) = telemetry(&self.shared.export_result).and_then(|mut r| r.take()) {
             return Export::Done(r);
         }
         if self.shared.exporting.load(Ordering::Acquire) {
@@ -988,7 +988,7 @@ impl Transport {
 
     /// The output device the stream that plays last opened.
     pub fn opened(&self) -> Option<DeviceInfo> {
-        self.shared.opened.lock().ok()?.clone()
+        telemetry(&self.shared.opened)?.clone()
     }
 
     /// The open device fails as if it was unplugged (it opens again, see `audio_thread`).
