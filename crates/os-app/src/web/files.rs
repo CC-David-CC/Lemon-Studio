@@ -15,6 +15,8 @@ use std::{
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
+mod workspace;
+
 #[wasm_bindgen(module = "/web/files.mjs")]
 extern "C" {
     #[wasm_bindgen(catch)]
@@ -59,11 +61,18 @@ enum Completion {
         PreparedSave,
         os_model::Project,
         f64,
+        Vec<u8>,
         Vec<(usize, Option<Vec<u8>>)>,
         PathBuf,
-        Result<(), String>,
+        Result<SaveReceipt, String>,
     ),
+    WorkspaceOpen(u64, Result<Option<workspace::Opened>, String>),
     Message(String),
+}
+enum SaveReceipt {
+    Browser,
+    Workspace { receipt: String, name: String },
+    Cancelled,
 }
 thread_local! {
     static GENERATION:Cell<u64>=const{Cell::new(0)};
@@ -72,14 +81,16 @@ thread_local! {
     static SAVING:Cell<bool>=const{Cell::new(false)};
     static EXPORT_PENDING:Cell<bool>=const{Cell::new(false)};
     static ONLINE_PENDING:Cell<bool>=const{Cell::new(false)};
-    static SAVE_PENDING:Cell<bool>=const{Cell::new(false)};
+    static SAVE_PENDING:Cell<Option<bool>>=const{Cell::new(None)};
     static SAVE_PLUGINS:RefCell<Option<std::collections::BTreeMap<usize, (os_host::Descriptor, Option<Vec<u8>>)>>> = const { RefCell::new(None) };
     static PREFS:RefCell<String>=const{RefCell::new(String::new())};
 }
 static COMPLETED: LazyLock<crossbeam::queue::SegQueue<Completion>> =
     LazyLock::new(Default::default);
 fn error(e: JsValue) -> String {
-    e.as_string().unwrap_or_else(|| format!("{e:?}"))
+    e.as_string()
+        .or_else(|| get(&e, "message").as_string())
+        .unwrap_or_else(|| format!("{e:?}"))
 }
 fn get(object: &JsValue, key: &str) -> JsValue {
     js_sys::Reflect::get(object, &key.into()).unwrap_or(JsValue::NULL)
@@ -94,9 +105,13 @@ fn complete(value: Completion) {
 pub fn retry_export() { EXPORT_PENDING.with(|p|p.set(true)); }
 pub fn retry_online() { ONLINE_PENDING.with(|p|p.set(true)); }
 pub fn changed_project() {
+    workspace::clear();
+    supersede_pending();
+}
+fn supersede_pending() {
     EXPORT_PENDING.with(|p|p.set(false));
     ONLINE_PENDING.with(|p|p.set(false));
-    SAVE_PENDING.with(|p|p.set(false));
+    SAVE_PENDING.with(|p|p.set(None));
     GENERATION.with(|g| g.set(g.get().wrapping_add(1)));
 }
 fn current() -> u64 {
@@ -112,6 +127,11 @@ fn states(app: &App) -> Option<Vec<(usize, Option<Vec<u8>>)>> {
 }
 
 pub async fn initialize() {
+    if workspace::enabled() {
+        let result = workspace::open(true).await;
+        COMPLETED.push(Completion::WorkspaceOpen(current(), result));
+        return;
+    }
     match restore().map_err(error) {
         Ok(promise) => match JsFuture::from(promise).await {
             Ok(value) => RESTORED.with_borrow_mut(|v| *v = Some(value)),
@@ -171,12 +191,21 @@ fn imported(value: JsValue, stored: bool) -> Result<Vec<Imported>, String> {
     Ok(files)
 }
 pub fn pick(app: &App, purpose: Import) {
+    if workspace::enabled() && SAVING.with(Cell::get) {
+        return;
+    }
     let channel = match purpose {
         Import::Sample(row) => app.state.project.channels.get(row).cloned(),
         _ => None,
     };
-    changed_project();
+    supersede_pending();
     let generation = current();
+    if matches!(purpose, Import::Project) && workspace::enabled() {
+        spawn_local(async move {
+            complete(Completion::WorkspaceOpen(generation, workspace::open(false).await));
+        });
+        return;
+    }
     let kind = match purpose {
         Import::Project => "project",
         Import::Folder => "folder",
@@ -226,26 +255,34 @@ fn apply_preferences(app: &mut App, text: &str) {
         app.state.monitor.cfg.load(text);
     }
 }
-pub fn save(app: &mut App) {
+pub fn save(app: &mut App, choose: bool) {
+    if app.loading() {
+        app.state.message = Some("Wait for the project to finish loading before saving".into());
+        return;
+    }
     if SAVING.with(Cell::get) {
         app.state.message = Some("A browser save is still in progress".into());
         return;
     }
-    let target = app
+    let in_workspace = workspace::enabled();
+    let mut target = app
         .state
         .path
         .clone()
         .unwrap_or_else(|| os_paths::fs::root().join("Untitled.flp"));
+    if in_workspace {
+        target.set_extension("lemon");
+    }
     let captured: Option<std::collections::BTreeMap<_,_>> = app.plugins.hosted.iter().map(|(&key,h)| {
         let p=h.plugin.try_lock().ok()?;
         Some((key,(p.desc().clone(),p.save_state())))
     }).collect();
     let Some(captured)=captured else {
-        SAVE_PENDING.with(|p|p.set(true));
+        SAVE_PENDING.with(|p|p.set(Some(choose)));
         app.state.message=Some("Waiting for instruments before saving…".into());
         return;
     };
-    SAVE_PENDING.with(|p|p.set(false));
+    SAVE_PENDING.with(|p|p.set(None));
     let old_states=captured.iter().map(|(&key,(_,state))|(key,state.clone())).collect();
     // Serialize one captured set of plugin states without locking the audio worker again.
     SAVE_PLUGINS.with_borrow_mut(|p|*p=Some(captured));
@@ -258,6 +295,23 @@ pub fn save(app: &mut App) {
             return;
         }
     };
+    let (generation, project, tempo, extra, states) = (
+        current(),
+        app.state.project.clone(),
+        app.state.tempo,
+        crate::lemon_state::saved_form(&app.state, &app.plugins),
+        old_states,
+    );
+    if in_workspace {
+        let request = workspace::save(app, &target, &save.bytes, choose);
+        SAVING.with(|s| s.set(true));
+        app.state.message = Some("Saving to Files…".into());
+        spawn_local(async move {
+            let result = workspace::saved(request).await;
+            complete(Completion::Save(generation, save, project, tempo, extra, states, target, result));
+        });
+        return;
+    }
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     if let Err(e) = download_bytes(&name, &save.bytes, "application/octet-stream") {
         app.state.message = Some(format!("Download failed: {e}"));
@@ -282,22 +336,16 @@ pub fn save(app: &mut App) {
         }
     }
     set(&snapshot, "files", &files);
-    let (generation, project, tempo, states) = (
-        current(),
-        app.state.project.clone(),
-        app.state.tempo,
-        old_states,
-    );
     let request = persist(&snapshot);
     SAVING.with(|s| s.set(true));
     app.state.message = Some("Download started; saving a copy in this browser…".into());
     spawn_local(async move {
         let result = match request {
-            Ok(p) => JsFuture::from(p).await.map(|_| ()).map_err(error),
+            Ok(p) => JsFuture::from(p).await.map(|_| SaveReceipt::Browser).map_err(error),
             Err(e) => Err(error(e)),
         };
         complete(Completion::Save(
-            generation, save, project, tempo, states, target, result,
+            generation, save, project, tempo, extra, states, target, result,
         ));
     });
 }
@@ -305,7 +353,8 @@ pub fn save(app: &mut App) {
 pub fn poll(app: &mut App) {
     if ONLINE_PENDING.with(Cell::get) && app.plugins.try_set_offline(false) { ONLINE_PENDING.with(|p|p.set(false)); }
     if EXPORT_PENDING.with(|p|p.replace(false)) { app.open_export(false); }
-    if SAVE_PENDING.with(Cell::get) { save(app); app.invalidate(); }
+    if let Some(choose) = SAVE_PENDING.with(Cell::get) { save(app, choose); app.invalidate(); }
+    workspace::poll_command(app);
     if let Some(snapshot) = RESTORED.with_borrow_mut(Option::take) {
         if let Some(prefs) = get(&snapshot, "preferences").as_string() {
             apply_preferences(app, &prefs);
@@ -326,45 +375,74 @@ pub fn poll(app: &mut App) {
                 app.state.message = Some(message);
                 app.invalidate();
             }
-            Completion::Save(generation, save, project, tempo, old_states, target, result) => {
+            Completion::Save(generation, save, project, tempo, extra, old_states, mut target, result) => {
                 // The browser UI cannot block while the audio worker owns an instrument.
                 let Some(current_states) = states(app) else {
-                    COMPLETED.push(Completion::Save(generation, save, project, tempo, old_states, target, result));
+                    COMPLETED.push(Completion::Save(generation, save, project, tempo, extra, old_states, target, result));
                     break;
                 };
                 SAVING.with(|s| s.set(false));
+                if let Ok(SaveReceipt::Workspace { receipt, .. }) = &result {
+                    if generation == current() {
+                        workspace::bind(app.state.path.clone(), receipt.clone());
+                    }
+                }
                 match result {
-                    Ok(())
+                    Ok(SaveReceipt::Cancelled) => {
+                        app.state.message = Some("Save cancelled".into());
+                    }
+                    Ok(receipt)
                         if generation == current()
                             && app.state.project == project
                             && app.state.tempo == tempo
+                            && crate::lemon_state::saved_form(&app.state, &app.plugins) == extra
                             && current_states == old_states =>
                     {
-                        let message = if save.lost.is_empty() {
-                            "Saved in this browser; download started".into()
-                        } else {
-                            format!(
-                                "Saved in this browser; not stored yet: {}",
-                                save.lost.join(", ")
-                            )
+                        let location = if matches!(&receipt, SaveReceipt::Workspace { .. }) {
+                            "Saved in Files"
+                        } else { "Saved in this browser" };
+                        let message = match (save.lost.is_empty(), &receipt) {
+                            (true, SaveReceipt::Browser) => format!("{location}; download started"),
+                            (true, _) => location.into(),
+                            (false, _) => format!("{location}; not stored yet: {}", save.lost.join(", ")),
                         };
+                        if let SaveReceipt::Workspace { name, .. } = &receipt {
+                            target.set_file_name(name);
+                            target.set_extension("lemon");
+                        }
                         app.adopt_save(save, target);
+                        if let SaveReceipt::Workspace { receipt, .. } = receipt {
+                            workspace::bind(app.state.path.clone(), receipt);
+                        }
                         app.state.message = Some(message);
                     }
-                    Ok(()) => {
-                        app.state.message = Some(
-                            "Earlier version saved in this browser; current edits remain unsaved"
-                                .into(),
-                        )
+                    Ok(receipt) => {
+                        let location = if matches!(&receipt, SaveReceipt::Workspace { .. }) {
+                            "Files"
+                        } else { "this browser" };
+                        app.state.message = Some(format!("Earlier version saved in {location}; current edits remain unsaved"));
                     }
                     Err(e) => {
-                        app.state.message = Some(format!(
-                            "Browser save failed: {e}. Download was started; edits remain unsaved."
-                        ))
+                        app.state.message = Some(if workspace::enabled() {
+                            format!("Files save failed: {e}")
+                        } else { format!("Browser save failed: {e}. Download was started; edits remain unsaved.") });
                     }
                 }
                 app.invalidate();
             }
+            Completion::WorkspaceOpen(generation, result) if generation == current() => {
+                match result {
+                    Ok(Some(project)) => {
+                        if let Err(e) = workspace::apply(app, project) {
+                            app.state.message = Some(format!("Could not open project: {e}"));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => app.state.message = Some(format!("Could not open project: {e}")),
+                }
+                app.invalidate();
+            }
+            Completion::WorkspaceOpen(..) => {}
             Completion::Sample(generation, row, channel, path, result) => {
                 if generation != current() || app.state.project.channels.get(row) != Some(&channel) {
                     continue;
@@ -404,7 +482,12 @@ pub fn poll(app: &mut App) {
             }
         }
     }
-    dirty(app.unsaved());
+    let unsaved = app.unsaved();
+    dirty(unsaved);
+    if workspace::enabled() {
+        workspace::report(app, unsaved);
+        return;
+    }
     let now = js_sys::Date::now();
     if PREFS_CHECK.with(|t| {
         if now - t.get() < 500.0 {

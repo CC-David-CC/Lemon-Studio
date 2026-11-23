@@ -16,7 +16,15 @@ export async function checkFiles(page) {
   };
   const wait=async(predicate)=>{const end=Date.now()+20000;let state;while(!predicate(state=await snapshot())){assert.ok(Date.now()<end,`Timed out: ${predicate}; ${JSON.stringify({notes:state.notes,channels:state.channels,dirty:state.dirty,message:state.message})}`);await page.waitForTimeout(25);}};
   const locked=()=>page.waitForFunction(async()=>(await import('./os_app.js')).plugin_lock_held(),null,{timeout:20000});
-  const click=async(action,options)=>{const s=await snapshot(),h=s.hits.findLast(h=>h.action===action||h.hint===action);assert.ok(h,`Missing ${action}`);const[x,y,w,z]=h.rect;await page.mouse.click(x+w/2,y+z/2,options);await page.waitForTimeout(150);};
+  const click = async (action, options) => {
+    const state = await snapshot();
+    const hit = state.hits.findLast(h => h.action === action || h.hint === action ||
+      h.hint === `Add ${action} (Shift+click: keep the palette open)`);
+    assert.ok(hit, `Missing ${action}`);
+    const [x,y,w,h] = hit.rect;
+    await page.mouse.click(x+w/2,y+h/2,options);
+    await page.waitForTimeout(150);
+  };
   const note=async(offset)=>{const h=(await snapshot()).hits.find(h=>h.action==='PianoGrid');await page.mouse.click(h.rect[0]+offset,h.rect[1]+100);await page.waitForTimeout(150);};
   const save=async()=>{const done=page.waitForEvent('download');await page.keyboard.press('Control+s');return done;};
   const storage=()=>page.evaluate(async()=>{const db=await new Promise((ok,no)=>{const r=indexedDB.open('lemon-studio',1);r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error);});try{return await new Promise((ok,no)=>{const r=db.transaction('workspace').objectStore('workspace').get('current');r.onsuccess=()=>ok({project:[...r.result.project],files:r.result.files.map(f=>({path:f.path,bytes:[...f.bytes]}))});r.onerror=()=>no(r.error);});}finally{db.close();}});

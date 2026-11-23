@@ -16,9 +16,15 @@ output="${WEB_BUILD_DIR:-$PWD/dist/web}"
 mkdir -p "$output/licenses"
 tools/web-cargo.sh -p os-app --lib --release "$@"
 tools/web-bindgen.sh "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/os_app.wasm" "$output"
-cp web/index.html web/bootstrap.mjs web/_headers LICENSE "$output/"
+cp web/index.html web/bootstrap.mjs web/worker.mjs web/_headers LICENSE "$output/"
+{
+  printf 'import * as bindgen from "./os_app.js";\n'
+  cat vendor/cpal/src/host/audioworklet/worklet.js
+} > "$output/audio-worklet.mjs"
 cp vendor/nih-plug/LICENSE "$output/licenses/NIH-plug.txt"
 cp vendor/cpal/LICENSE "$output/licenses/CPAL.txt"
+cp vendor/wasm_thread/LICENSE-APACHE "$output/licenses/wasm-thread-Apache.txt"
+cp vendor/wasm_thread/LICENSE-MIT "$output/licenses/wasm-thread-MIT.txt"
 cp crates/os-ui/fonts/Cuprum/OFL.txt "$output/licenses/Cuprum.txt"
 cp crates/os-ui/fonts/Barlow/OFL.txt "$output/licenses/Barlow.txt"
 cp crates/os-ui/icons/TABLER-LICENSE.txt "$output/licenses/Tabler.txt"

@@ -5699,7 +5699,7 @@ impl App {
     fn theme_dialog(&mut self) { crate::web::pick(self,crate::web::Import::Theme); }
 
     #[cfg(target_arch = "wasm32")]
-    fn save(&mut self, _: bool) { crate::web::files::save(self); }
+    fn save(&mut self, choose: bool) { crate::web::files::save(self, choose); }
 
 
     pub(crate) fn settings_act(&mut self, a: views::settings::SAct) {

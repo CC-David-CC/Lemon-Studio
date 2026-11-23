@@ -105,9 +105,12 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 pub const STATE_WAIT: Duration = Duration::from_millis(12);
 /// How long the UI's per-tick work may wait for such moments, all instances together, per `TICK_WINDOW`: the wait is on
 /// the UI thread, and a project has many instances. Past it, an instance not free at once skips the tick.
+#[cfg(not(target_arch = "wasm32"))]
 const TICK_BUDGET: Duration = Duration::from_millis(3);
+#[cfg(not(target_arch = "wasm32"))]
 const TICK_WINDOW: Duration = Duration::from_millis(16);
 
+#[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     /// When the current `TICK_WINDOW` started and what it has waited.
     static TICK_WAITED: std::cell::Cell<Option<(Instant, Duration)>> = const { std::cell::Cell::new(None) };
@@ -116,6 +119,7 @@ thread_local! {
 /// Locks `m` for the UI's per-tick work on an instance (its idle, its parameters), `None` to skip
 /// the tick. One whose holds are short (`Meter::holds_long`) is taken if free, with no wait; a long one waits for the
 /// moment between two blocks (`lock_between_blocks`), out of `TICK_BUDGET`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn lock_for_tick<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Option<&os_host::Meter>) -> Option<std::sync::MutexGuard<'a, T>> {
     if !meter.is_some_and(os_host::Meter::holds_long) {
         return m.try_lock().ok();
@@ -125,6 +129,12 @@ pub fn lock_for_tick<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Option<&o
     let got = lock_between_blocks(m, meter, TICK_BUDGET.saturating_sub(waited));
     TICK_WAITED.set(Some((start, waited + t0.elapsed())));
     got
+}
+
+/// The browser main thread cannot sleep or wait on an audio worker's mutex.
+#[cfg(target_arch = "wasm32")]
+pub fn lock_for_tick<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, _: Option<&os_host::Meter>) -> Option<std::sync::MutexGuard<'a, T>> {
+    m.try_lock().ok()
 }
 
 /// Locks `m` for a UI call that may hold it a few ms: right after the audio thread processed it (`meter`), when it will
@@ -184,7 +194,10 @@ impl Hosted {
     /// Locks the instance to read its whole state (a save, an autosave): between two of its blocks
     /// ([`lock_between_blocks`]), else once the audio thread lets go of it. Never fails for want of the moment.
     pub fn lock_for_state(&self) -> Option<std::sync::MutexGuard<'_, dyn os_host::Plugin + 'static>> {
-        self.lock_between_blocks().or_else(|| self.plugin.lock().ok())
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.lock_between_blocks().or_else(|| self.plugin.lock().ok());
+        #[cfg(target_arch = "wasm32")]
+        self.plugin.try_lock().ok()
     }
 
     /// Locks the instance for a UI call that may hold it a few ms (reading its state), between two of its blocks
@@ -852,6 +865,15 @@ impl Plugins {
         self.hosted.get(&key)?.lock_for_state()?.save_state()
     }
 
+    /// Use the browser's captured plugin state during serialization.
+    pub(crate) fn matching_state(&self, key: usize, matches: impl FnOnce(&Descriptor) -> bool) -> Option<Vec<u8>> {
+        #[cfg(target_arch = "wasm32")]
+        if let Some((descriptor, state)) = crate::web::files::saved_plugin(key) {
+            return if matches(&descriptor) { state } else { None };
+        }
+        let plugin = self.hosted.get(&key)?.lock_for_state()?;
+        if matches(plugin.desc()) { plugin.save_state() } else { None }
+    }
 
     /// Marks the instance under `key`, just created, as a copy standing in for a plugin in another format
     /// (`Hosted::stand_in`).
@@ -934,46 +956,30 @@ impl Plugins {
 
     /// Edison's state (the project file's form) of the Tesla hosted under `key`; `None` for any other plugin.
     pub fn edison_file_state(&self, key: usize) -> Option<Vec<u8>> {
-        let h = self.hosted.get(&key)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != TESLA {
-            return None;
-        }
-        tesla::edison_from_plugin_state(&p.save_state()?)
+        let state = self.matching_state(key, |desc| desc.name == TESLA)?;
+        tesla::edison_from_plugin_state(&state)
     }
 
     /// Love Philter's state (the project file's form) of the Pulp Filter hosted under `key`; `None` for any other
     /// plugin, and for one on its starting state that was never edited.
     pub fn love_philter_file_state(&self, key: usize) -> Option<Vec<u8>> {
-        let h = self.hosted.get(&key)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != PULP_FILTER {
-            return None;
-        }
-        pulp_filter::fl_from_plugin_state(&p.save_state()?).filter(|b| !b.is_empty())
+        let state = self.matching_state(key, |desc| desc.name == PULP_FILTER)?;
+        pulp_filter::fl_from_plugin_state(&state).filter(|b| !b.is_empty())
     }
 
     /// Maximus's state (the project file's form) of the Press hosted under `key`; `None` for any other plugin, and
     /// for one on its starting state that was never edited.
     pub fn maximus_file_state(&self, key: usize) -> Option<Vec<u8>> {
-        let h = self.hosted.get(&key)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != PRESS {
-            return None;
-        }
-        press::fl_from_plugin_state(&p.save_state()?).filter(|b| !b.is_empty())
+        let state = self.matching_state(key, |desc| desc.name == PRESS)?;
+        press::fl_from_plugin_state(&state).filter(|b| !b.is_empty())
     }
 
     /// The FL state (the project file's form) of the Lemon effect hosted under `key`, when it is the one that plays
     /// slots stored as `file` (`FL_RECREATIONS`); `None` for any other plugin.
     pub fn recreation_file_state(&self, key: usize, file: &str) -> Option<Vec<u8>> {
         let lemon = recreation_of(file)?;
-        let h = self.hosted.get(&key)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != lemon || !crate::project_plugins::is_builtin(p.desc()) {
-            return None;
-        }
-        fl_from_recreation_state(lemon, &p.save_state()?)
+        let state = self.matching_state(key, |desc| desc.name == lemon && crate::project_plugins::is_builtin(desc))?;
+        fl_from_recreation_state(lemon, &state)
     }
 
     /// Row `row`'s Lemon Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.

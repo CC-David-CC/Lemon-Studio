@@ -10,7 +10,11 @@ import sys
 import zipfile
 
 root, archive = map(Path, sys.argv[1:])
-required = {"index.html", "bootstrap.mjs", "os_app.js", "os_app_bg.wasm", "utf8.mjs", "_headers", "LICENSE"}
+required = {
+    "index.html", "bootstrap.mjs", "worker.mjs", "audio-worklet.mjs", "os_app.js",
+    "os_app_bg.wasm", "utf8.mjs", "_headers", "LICENSE",
+    "licenses/wasm-thread-Apache.txt", "licenses/wasm-thread-MIT.txt",
+}
 assert all((root / name).is_file() for name in required), "Missing web runtime asset or license"
 headers = (root / "_headers").read_text()
 assert "Cross-Origin-Opener-Policy: same-origin" in headers

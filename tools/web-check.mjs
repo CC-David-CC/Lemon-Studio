@@ -104,7 +104,7 @@ try {
     const param = async () => (await snapshot()).parameters[0].values.find(p => /start.*offset/i.test(p.name))?.value;
     const before = await param(); assert.equal(before, 0);
     await page.mouse.click(bounds.x+40, bounds.y+210, {button:'right'});
-    await page.getByRole('button',{name:'Type in value...'}).click();
+    await page.getByRole('button',{name:'Enter value...', exact:true}).click();
     await page.getByRole('textbox',{name:'Parameter value'}).fill('100');
     await page.getByRole('button',{name:'Apply',exact:true}).click();
     await page.waitForTimeout(200);
@@ -151,7 +151,16 @@ try {
   } else if (mode === 'audio') {
     await page.locator('html[data-lemon-ready=true]').waitFor(); await page.waitForTimeout(300);
     const snapshot=()=>page.evaluate(async()=>JSON.parse(globalThis.lemonTestSnapshot()));
-    const click=async(action)=>{const s=await snapshot(), h=s.hits.findLast(h=>h.action===action || h.hint===action);assert.ok(h,`Missing ${action}: ${JSON.stringify(s.hits.filter(h=>h.action.includes('Popup')))}`);const[x,y,w,z]=h.rect;await page.mouse.click(x+w/2,y+z/2);await page.waitForTimeout(250);};
+    const click = async action => {
+      const hit = await page.waitForFunction(name => {
+        const state = JSON.parse(globalThis.lemonTestSnapshot());
+        return state.hits.findLast(h => h.action === name || h.hint === name ||
+          h.hint === `Add ${name} (Shift+click: keep the palette open)`);
+      }, action);
+      const [x,y,w,h] = (await hit.jsonValue()).rect;
+      await page.mouse.click(x+w/2,y+h/2);
+      await page.waitForTimeout(250);
+    };
     await page.waitForFunction(()=>{const s=globalThis.lemonTestSnapshot();return s && !JSON.parse(s).loading;});
     await click('Menu(2)'); await click('MenuItem(2, 0)');
 
@@ -171,7 +180,9 @@ try {
     const playing=await snapshot(); console.log('playing',playing.audio,playing.message);
     assert.ok(playing.audio.rendered>0,'AudioWorklet must render');
     assert.ok(measuredPeak>0.001 && measuredPeak<=2,'Oscillator must produce bounded audio');
-    await page.keyboard.press('F8'); await page.waitForTimeout(150); await click('Lemon Parametric EQ');
+    await page.keyboard.press('F8');
+    await click('Palette(Kind(Effects))');
+    await click('Lemon Parametric EQ');
     await page.locator('.plugin-window canvas').waitFor(); await page.waitForTimeout(300);
     await page.getByRole('button',{name:'Close instrument editor'}).click();
     await page.locator('.plugin-window').waitFor({state:'detached'});
@@ -189,7 +200,14 @@ try {
     await page.locator('#audio-status').click(); await page.locator('#audio-status').waitFor({state:'hidden'});
     await page.waitForTimeout(200);
     await click('Stop'); await page.waitForTimeout(400); const stopped=await snapshot();
-    assert.equal(stopped.audio.state,'Stopped'); console.log('stopped contexts',await page.evaluate(()=>__audioContexts.map(c=>c.state)));assert.ok(await page.evaluate(()=>__audioContexts.every(c=>c.state!=='running')),'Stop closes output contexts');
+    assert.equal(stopped.audio.state,'Stopped');
+    assert.equal(stopped.audio.tick, 0, 'Stop rewinds the transport');
+    // Stop can leave the output device available for instrument tails and keyboard audition.
+    await page.evaluate(()=>window.dispatchEvent(new Event('pagehide')));
+    await page.waitForFunction(() => __audioContexts.every(c => c.state === 'closed'));
+    await page.reload();
+    await page.locator('html[data-lemon-ready=true]').waitFor();
+    await page.evaluate(async()=>{globalThis.lemonTestSnapshot=(await import('./os_app.js')).snapshot;});
     await page.evaluate(()=>globalThis.__denyAudio=true); await click('Play'); await page.waitForTimeout(800);
     assert.match((await snapshot()).message,/audio|context|output|device/i,'Audio startup failure must be visible');
     await page.evaluate(()=>globalThis.__denyAudio=false); await click('Stop');

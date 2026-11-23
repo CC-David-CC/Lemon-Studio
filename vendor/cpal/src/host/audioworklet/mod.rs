@@ -27,7 +27,6 @@ use crate::{
 };
 
 mod dependent_module;
-use crate::dependent_module;
 
 /// Content is false if the iterator is empty.
 pub struct Devices(bool);
@@ -394,7 +393,7 @@ impl DeviceTrait for Device {
         let ctx = audio_context.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result: Result<(), JsValue> = async move {
-                let mod_url = dependent_module!("worklet.js")?;
+                let mod_url = dependent_module::worklet_url()?;
                 wasm_bindgen_futures::JsFuture::from(ctx.audio_worklet()?.add_module(&mod_url)?)
                     .await?;
 

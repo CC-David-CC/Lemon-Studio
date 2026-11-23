@@ -29,12 +29,8 @@ impl Plugins {
     /// The Ogun state the Smith on rack row `row` plays (empty while it plays its default patch), `None` when the row
     /// hosts something else.
     pub fn ogun_file_state(&self, row: usize) -> Option<Vec<u8>> {
-        let h = self.hosted.get(&row)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != SMITH || !crate::project_plugins::is_builtin(p.desc()) {
-            return None;
-        }
-        smith::fl_from_plugin_state(&p.save_state()?)
+        let state = self.matching_state(row, |desc| desc.name == SMITH && crate::project_plugins::is_builtin(desc))?;
+        smith::fl_from_plugin_state(&state)
     }
 }
 

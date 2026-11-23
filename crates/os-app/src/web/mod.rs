@@ -8,8 +8,9 @@ pub use files::{pick,Import};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
-pub async fn start() {
+pub async fn start(worker_url: String) {
     console_error_panic_hook::set_once();
+    wasm_thread::Builder::new().worker_script_url(worker_url).set_default();
     files::initialize().await;
     crate::run();
 }
