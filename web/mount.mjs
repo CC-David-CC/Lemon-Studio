@@ -28,13 +28,14 @@ export function mount(host) {
   const {signal} = controller;
   const section = element('section', {className:'window-content binary-studio'});
   const styles = element('link', {rel:'stylesheet', href:new URL('./workspace.css', import.meta.url).href});
+  const controlsStyle = element('link', {rel:'stylesheet', href:new URL('./controls.css', import.meta.url).href});
   const toolbar = element('div', {className:'binary-studio-tools'});
   const frame = element('iframe', {
     className:'binary-studio-native', title:'Lemon Studio', allow:'cross-origin-isolated; autoplay',
   });
   const status = element('p', {className:'binary-studio-status', textContent:'Starting Lemon Studio…'});
   status.setAttribute('role', 'status');
-  section.append(styles, toolbar, frame, status);
+  section.append(styles, controlsStyle, toolbar, frame, status);
   const receipts = new Map();
   let nextReceipt = 0;
   let context, command, pending, unregister, binding;

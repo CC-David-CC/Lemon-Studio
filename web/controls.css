@@ -1,0 +1,11 @@
+.binary-studio-tools button {
+  background: #25292f;
+  color: #edf0f4;
+  border: 1px solid #707883;
+  border-radius: 3px;
+  padding-inline: .6rem;
+}
+
+.binary-studio-tools button:disabled {
+  opacity: .55;
+}

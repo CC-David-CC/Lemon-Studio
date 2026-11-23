@@ -867,13 +867,13 @@ impl Transport {
         if self.shared.state.load(Ordering::Acquire) != PLAYING {
             return None;
         }
-        *self.shared.pace.lock().ok()?
+        *telemetry(&self.shared.pace)?
     }
 
     /// Fills `out` with the output heard last (mono, oldest first, at most `monitor::MAX_FFT`) and returns the count
     /// of frames heard; an unchanged count means nothing was played since the last call (`Tap::heard`).
     pub fn tap(&self, out: &mut [f32]) -> u64 {
-        let Ok(t) = self.shared.tap.lock() else { return 0 };
+        let Some(t) = telemetry(&self.shared.tap) else { return 0 };
         let heard = t.heard(Instant::now());
         let n = out.len().min(crate::monitor::MAX_FFT).min(heard as usize);
         let skip = out.len() - n;
@@ -893,7 +893,7 @@ impl Transport {
 
     /// Output peaks (L, R) of what was heard since the last call (the toolbar meter's feed).
     pub fn take_peaks(&self) -> (f32, f32) {
-        let Ok(mut t) = self.shared.tap.lock() else { return (0.0, 0.0) };
+        let Some(mut t) = telemetry(&self.shared.tap) else { return (0.0, 0.0) };
         let heard = t.heard(Instant::now());
         let from = t.metered.max(heard.saturating_sub(TAP_FRAMES as u64));
         t.metered = heard;
@@ -920,17 +920,17 @@ impl Transport {
 
     /// Notes playing now (pattern or song playback, not previews), as (channel index, key).
     pub fn sounding(&self) -> Vec<(u16, u16)> {
-        self.shared.sounding.lock().map(|v| v.clone()).unwrap_or_default()
+        telemetry(&self.shared.sounding).map(|v| v.clone()).unwrap_or_default()
     }
 
     pub fn take_error(&self) -> Option<String> {
-        self.shared.error.lock().ok()?.take()
+        telemetry(&self.shared.error)?.take()
     }
 
     /// The engine's own voices sounding on every stream (playback, previews, live notes), as of their last fill.
     /// Hosted instruments count theirs (spec: audio/voices.md §5).
     pub fn engine_voices(&self) -> usize {
-        let Ok(v) = self.shared.engine_voices.lock() else { return 0 };
+        let Some(v) = telemetry(&self.shared.engine_voices) else { return 0 };
         v.iter().filter_map(Weak::upgrade).map(|n| n.load(Ordering::Relaxed) as usize).sum()
     }
 
@@ -1320,6 +1320,14 @@ impl Feeder {
 /// the hosted plugins, before the app destroys them. Left running at exit, it still held the plugins of a playing or
 /// paused stream; those were then destroyed as the process ended, after their plugin files had shut down, and the
 /// app crashed on close.
+fn telemetry<T>(value: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    // The browser UI can read the next sample when the audio worker holds the current one.
+    #[cfg(target_arch = "wasm32")]
+    return value.try_lock().ok();
+    #[cfg(not(target_arch = "wasm32"))]
+    value.lock().ok()
+}
+
 impl Drop for Transport {
     fn drop(&mut self) {
         // The audio thread ends when its command channel closes.
