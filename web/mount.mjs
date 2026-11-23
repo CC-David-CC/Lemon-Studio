@@ -26,7 +26,7 @@ export function mount(host) {
   const session = host.session();
   const controller = new AbortController();
   const {signal} = controller;
-  const section = element('section', {className:'window-content binary-studio'});
+  const section = element('section', {className:'window-content binary-studio lemon-studio'});
   const styles = element('link', {rel:'stylesheet', href:new URL('./workspace.css', import.meta.url).href});
   const controlsStyle = element('link', {rel:'stylesheet', href:new URL('./controls.css', import.meta.url).href});
   const toolbar = element('div', {className:'binary-studio-tools'});

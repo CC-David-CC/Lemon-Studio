@@ -1,4 +1,4 @@
-.binary-studio-tools button {
+.lemon-studio .binary-studio-tools button {
   background: #25292f;
   color: #edf0f4;
   border: 1px solid #707883;
@@ -6,6 +6,6 @@
   padding-inline: .6rem;
 }
 
-.binary-studio-tools button:disabled {
+.lemon-studio .binary-studio-tools button:disabled {
   opacity: .55;
 }
